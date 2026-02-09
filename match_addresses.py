@@ -11,11 +11,16 @@ import sys
 import re
 import json
 import ast
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 from collections import defaultdict
 import pandas as pd
 
 # Try to use rapidfuzz for faster matching, fall back to difflib
+fuzz: Any = None
+process: Any = None
+SequenceMatcher: Any = None
+USE_RAPIDFUZZ: bool = False
+
 try:
     from rapidfuzz import fuzz, process
     USE_RAPIDFUZZ = True

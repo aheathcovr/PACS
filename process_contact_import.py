@@ -145,14 +145,14 @@ def main():
     excel_file = 'PACS employees and facilities.xlsx'
     contact_sheet = 'HubSpot Contact Import'
     facilities_sheet = 'Matched Facilities Final Clean'
-    output_sheet = 'HubSpot Contact Import Processed'
+    output_sheet = 'HubSpot Contacts Processed'
     
     print("=" * 60)
     print("HubSpot Contact Import Processing")
     print("=" * 60)
     
     # Step 1: Read sheets
-    print(f"\n[1/4] Reading Excel sheets...")
+    print(f"\n[1/5] Reading Excel sheets...")
     try:
         contact_df = pd.read_excel(excel_file, sheet_name=contact_sheet)
         facilities_df = pd.read_excel(excel_file, sheet_name=facilities_sheet)
@@ -163,7 +163,7 @@ def main():
         sys.exit(1)
     
     # Step 2: Create address lookup from Matched Facilities
-    print(f"\n[2/4] Building address lookup...")
+    print(f"\n[2/5] Building address lookup...")
     address_lookup = {}
     for _, row in facilities_df.iterrows():
         addr = str(row.get('unique_address', '')).strip() if pd.notna(row.get('unique_address')) else ''
@@ -184,7 +184,7 @@ def main():
     
     # Initialize new columns
     contact_df['HubSpot Company Association'] = ''
-    contact_df['ClickUp Company Assocation'] = ''
+    contact_df['ClickUp Company Association'] = ''
     contact_df['First Name'] = ''
     contact_df['Last Name'] = ''
     contact_df['HubSpot Contact Record ID'] = ''
@@ -210,7 +210,7 @@ def main():
             
             # Extract and set ClickUp task ID
             task_id = extract_clickup_task_id(match_data['clickup_task_url'])
-            contact_df.at[idx, 'ClickUp Company Assocation'] = task_id
+            contact_df.at[idx, 'ClickUp Company Association'] = task_id
         
         # Split name into First Name and Last Name
         full_name = row.get('name', '')
