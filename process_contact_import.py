@@ -152,7 +152,7 @@ def main():
     print("=" * 60)
     
     # Step 1: Read sheets
-    print(f"\n[1/5] Reading Excel sheets...")
+    print(f"\n[1/6] Reading Excel sheets...")
     try:
         contact_df = pd.read_excel(excel_file, sheet_name=contact_sheet)
         facilities_df = pd.read_excel(excel_file, sheet_name=facilities_sheet)
@@ -163,7 +163,7 @@ def main():
         sys.exit(1)
     
     # Step 2: Create address lookup from Matched Facilities
-    print(f"\n[2/5] Building address lookup...")
+    print(f"\n[2/6] Building address lookup...")
     address_lookup = {}
     for _, row in facilities_df.iterrows():
         addr = str(row.get('unique_address', '')).strip() if pd.notna(row.get('unique_address')) else ''
@@ -176,11 +176,11 @@ def main():
     print(f"  ✓ Built lookup for {len(address_lookup)} addresses")
     
     # Step 3: Load HubSpot contacts for fast lookup
-    print(f"\n[3/5] Loading HubSpot contacts from BigQuery...")
+    print(f"\n[3/6] Loading HubSpot contacts from BigQuery...")
     _, email_lookup, name_lookup = load_hubspot_contacts()
     
     # Step 4: Process each contact
-    print(f"\n[4/5] Processing contacts...")
+    print(f"\n[4/6] Processing contacts...")
     
     # Initialize new columns
     contact_df['HubSpot Company Association'] = ''
@@ -231,8 +231,30 @@ def main():
     print(f"  ✓ Matched {matched_count} contacts to facilities")
     print(f"  ✓ Found {existing_contacts} existing contacts in HubSpot")
     
-    # Step 5: Save results
-    print(f"\n[5/5] Saving results to Excel...")
+    # Step 5: Deduplicate contacts
+    print(f"\n[5/6] Deduplicating contacts...")
+    original_count = len(contact_df)
+    
+    # Create deduplication key from facility, first name, last name, and emails
+    contact_df['dedup_key'] = (
+        contact_df['facility'].fillna('').str.lower().str.strip() + '|' +
+        contact_df['First Name'].fillna('').str.lower().str.strip() + '|' +
+        contact_df['Last Name'].fillna('').str.lower().str.strip() + '|' +
+        contact_df['emails'].fillna('').str.lower().str.strip()
+    )
+    
+    # Remove duplicates, keeping the first occurrence
+    contact_df = contact_df.drop_duplicates(subset=['dedup_key'], keep='first')
+    
+    # Remove the temporary dedup key column
+    contact_df = contact_df.drop(columns=['dedup_key'])
+    
+    deduped_count = len(contact_df)
+    removed_count = original_count - deduped_count
+    print(f"  ✓ Removed {removed_count} duplicates, {deduped_count} unique contacts remaining")
+    
+    # Step 6: Save results
+    print(f"\n[6/6] Saving results to Excel...")
     try:
         with pd.ExcelWriter(excel_file, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
             contact_df.to_excel(writer, sheet_name=output_sheet, index=False)
