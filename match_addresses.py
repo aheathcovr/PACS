@@ -154,9 +154,19 @@ def normalize_address(addr: str) -> str:
         return ""
     addr = str(addr).lower().strip()
     addr = re.sub(r'\s+', ' ', addr)
+    
+    # Remove common country suffixes (various formats)
     addr = re.sub(r',?\s*united states of america$', '', addr)
     addr = re.sub(r',?\s*usa$', '', addr)
-    return addr.strip()
+    addr = re.sub(r',?\s*united states$', '', addr)
+    addr = re.sub(r',?\s*us$', '', addr)
+    
+    # Remove extra punctuation and normalize
+    addr = re.sub(r',+', ',', addr)  # Multiple commas to single
+    addr = re.sub(r',\s*$', '', addr)  # Trailing comma
+    addr = addr.strip()
+    
+    return addr
 
 
 def build_hubspot_address(row: pd.Series) -> str:
@@ -242,12 +252,28 @@ def combined_similarity_score(target_addr: str, target_facility: str,
     if not target_addr or not candidate_addr:
         return 0.0
     
+    # Normalize addresses before comparison
+    norm_target_addr = normalize_address(target_addr)
+    norm_candidate_addr = normalize_address(candidate_addr)
+    
+    # Check for near-exact address match first (give bonus for nearly identical addresses)
+    if norm_target_addr == norm_candidate_addr:
+        # Exact match after normalization - use ONLY address score
+        return 1.0
+    elif norm_target_addr in norm_candidate_addr or norm_candidate_addr in norm_target_addr:
+        # One contains the other (very close match) - heavily weight address
+        if USE_RAPIDFUZZ:
+            addr_score = fuzz.token_set_ratio(norm_target_addr, norm_candidate_addr) / 100.0
+        else:
+            addr_score = SequenceMatcher(None, norm_target_addr, norm_candidate_addr).ratio()
+        return max(addr_score, 0.9)  # Ensure at least 0.9 for near-matches
+    
+    # For non-matching addresses, use weighted combination
     # Address similarity (weight: 60%)
     if USE_RAPIDFUZZ:
-        addr_score = fuzz.token_set_ratio(target_addr, candidate_addr) / 100.0
+        addr_score = fuzz.token_set_ratio(norm_target_addr, norm_candidate_addr) / 100.0
     else:
-        addr_score = SequenceMatcher(None, normalize_address(target_addr), 
-                                      normalize_address(candidate_addr)).ratio()
+        addr_score = SequenceMatcher(None, norm_target_addr, norm_candidate_addr).ratio()
     
     # Facility name similarity (weight: 40%)
     facility_score = 0.0
@@ -283,6 +309,7 @@ def find_best_match_combined(target_addr: str, target_facility: str,
 def main():
     excel_file = 'PACS employees and facilities.xlsx'
     output_sheet = 'Matched Facilities'
+    required_sheets = ['Unique Addresses', 'employees']
     
     print("=" * 60)
     print("Address + Facility Name Matching Script")
@@ -290,8 +317,29 @@ def main():
     print(f"Using: {'rapidfuzz' if USE_RAPIDFUZZ else 'difflib'}")
     print("=" * 60)
     
-    # Step 1: Read unique addresses and map facility names
+    # Step 1: Validate Excel file and required sheets
     print("\n[1/6] Reading unique addresses and mapping facility names...")
+    
+    # Check if file exists
+    if not os.path.exists(excel_file):
+        print(f"  ✗ ERROR: Excel file not found: {excel_file}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Get available sheet names
+    try:
+        xlsx = pd.ExcelFile(excel_file)
+        available_sheets = xlsx.sheet_names
+        print(f"  Available sheets: {available_sheets}")
+    except Exception as e:
+        print(f"  ✗ ERROR: Cannot read Excel file: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Check for required sheets
+    missing_sheets = [s for s in required_sheets if s not in available_sheets]
+    if missing_sheets:
+        print(f"  ✗ ERROR: Missing required sheets: {missing_sheets}", file=sys.stderr)
+        sys.exit(1)
+    
     try:
         unique_df = pd.read_excel(excel_file, sheet_name='Unique Addresses')
         
@@ -408,7 +456,7 @@ def main():
     # Step 5: Match addresses with combined scoring
     print("\n[5/6] Matching with address + facility name...")
     results = []
-    match_threshold = 0.5
+    match_threshold = 0.6
     stats = {'hs_state_match': 0, 'hs_fallback': 0, 'cu_state_match': 0, 'cu_fallback': 0, 
              'corp_state_match': 0, 'corp_fallback': 0}
     
