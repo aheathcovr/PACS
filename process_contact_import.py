@@ -26,6 +26,7 @@ except ImportError:
 BQ_PROJECT_ID = os.getenv('BQ_PROJECT_ID', 'gen-lang-client-0844868008')
 BQ_LOCATION = os.getenv('BQ_LOCATION', 'US')
 HUBSPOT_CONTACTS_TABLE = f'{BQ_PROJECT_ID}.HubSpot_Airbyte.contacts'
+CLICKUP_TABLE = f'{BQ_PROJECT_ID}.ClickUp_AirbyteCustom.task'
 
 BQ_CLIENT = None
 
@@ -193,6 +194,76 @@ def check_hubspot_contact_exists(email_lookup: dict, name_lookup: dict,
     return None
 
 
+def load_clickup_contacts() -> Tuple[dict, dict]:
+    """Load ClickUp tasks into memory for contact matching."""
+    if not BIGQUERY_AVAILABLE:
+        return {}, {}
+    
+    client = init_bigquery_client()
+    
+    query = f"""
+    SELECT 
+        id as task_id,
+        name as task_name,
+        url as task_url
+    FROM `{CLICKUP_TABLE}`
+    WHERE name IS NOT NULL
+    """
+    
+    try:
+        print("  Loading ClickUp tasks from BigQuery...")
+        df = client.query(query).to_dataframe()
+        print(f"  ✓ Loaded {len(df)} ClickUp tasks")
+        
+        # Build lookup indexes by name
+        name_lookup = {}
+        url_lookup = {}
+        
+        for _, row in df.iterrows():
+            task_name = str(row['task_name']).strip() if pd.notna(row['task_name']) else ''
+            task_id = str(row['task_id']) if pd.notna(row['task_id']) else ''
+            task_url = str(row['task_url']) if pd.notna(row['task_url']) else ''
+            
+            if task_name:
+                # Create name key (first|last or just first if no last)
+                name_parts = task_name.lower().split()
+                if len(name_parts) >= 2:
+                    name_key = f"{name_parts[0]}|{name_parts[-1]}"
+                else:
+                    name_key = f"{name_parts[0]}|"
+                
+                name_lookup[name_key] = {
+                    'clickup_task_id': task_id,
+                    'clickup_task_name': task_name,
+                    'clickup_task_url': task_url
+                }
+                
+                # Also index by full name
+                url_lookup[task_name.lower()] = {
+                    'clickup_task_id': task_id,
+                    'clickup_task_name': task_name,
+                    'clickup_task_url': task_url
+                }
+        
+        return name_lookup, url_lookup
+        
+    except Exception as e:
+        print(f"  Warning: Error loading ClickUp contacts: {e}")
+        return {}, {}
+
+
+def check_clickup_contact_exists(clickup_name_lookup: dict, clickup_url_lookup: dict,
+                                  first_name: str, last_name: str, email: str) -> Optional[dict]:
+    """Check if contact exists in ClickUp using in-memory lookups."""
+    # Check by name
+    if first_name and last_name:
+        name_key = f"{str(first_name).lower().strip()}|{str(last_name).lower().strip()}"
+        if name_key in clickup_name_lookup:
+            return clickup_name_lookup[name_key]
+    
+    return None
+
+
 def main():
     excel_file = 'PACS employees and facilities.xlsx'
     contact_sheet = 'HubSpot Contact Import'
@@ -242,38 +313,82 @@ def main():
         print(f"  ✗ ERROR: Could not find facilities sheet. Tried: {facilities_sheet_candidates}", file=sys.stderr)
         sys.exit(1)
     
+    # Filter out contacts with job title "Administrator In Training"
+    # Try different possible column names
+    job_title_column = None
+    possible_columns = ['job', 'job title', 'job_title', 'title', 'position', 'Job Title']
+    for col in possible_columns:
+        if col in contact_df.columns:
+            job_title_column = col
+            break
+    
+    original_count = len(contact_df)
+    if job_title_column:
+        contact_df = contact_df[contact_df[job_title_column] != 'Administrator In Training']
+        filtered_count = original_count - len(contact_df)
+        print(f"  ✓ Filtered out {filtered_count} contacts with job title 'Administrator In Training'")
+    else:
+        print(f"  ⚠ Warning: Could not find job title column. Available columns: {list(contact_df.columns)}")
+    
     # Step 2: Create facility lookup from Matched Facilities Final Clean
     # We need to match by facility_name, not address
+    # Handle duplicate facility names by keeping all entries
     print(f"\n[2/6] Building facility lookup...")
     facility_lookup = {}
+    facility_duplicates = {}  # Track duplicates for debugging
     for _, row in facilities_df.iterrows():
         facility_name = str(row.get('facility_name', '')).strip() if pd.notna(row.get('facility_name')) else ''
         if facility_name:
-            facility_lookup[facility_name.lower()] = {
+            key = facility_name.lower()
+            entry = {
                 'hubspot_record_id': row.get('hubspot_record_id', ''),
                 'clickup_task_url': row.get('clickup_task_url', ''),
                 'hubspot_company_name': row.get('hubspot_company_name', '')
             }
+            if key in facility_lookup:
+                # Track duplicates
+                if key not in facility_duplicates:
+                    facility_duplicates[key] = [facility_lookup[key]]
+                facility_duplicates[key].append(entry)
+                # Keep the first one (or decide which one to keep)
+                # Currently keeping the first one to match HubSpot behavior
+            else:
+                facility_lookup[key] = entry
+    
+    if facility_duplicates:
+        print(f"  ⚠ Found {len(facility_duplicates)} facilities with duplicate names")
+        for name, entries in list(facility_duplicates.items())[:5]:  # Show first 5
+            print(f"    - '{name}': {len(entries)} entries")
+    
     print(f"  ✓ Built lookup for {len(facility_lookup)} facilities")
     
     # Step 3: Load HubSpot contacts for fast lookup
     print(f"\n[3/6] Loading HubSpot contacts from BigQuery...")
     _, email_lookup, name_lookup = load_hubspot_contacts()
     
+    # Step 3b: Load ClickUp contacts for fast lookup
+    print(f"\n[3b/6] Loading ClickUp contacts from BigQuery...")
+    clickup_name_lookup, clickup_url_lookup = load_clickup_contacts()
+    
     # Step 4: Process each contact
     print(f"\n[4/6] Processing contacts...")
     
     # Initialize new columns
-    contact_df['HubSpot Company Association'] = ''
-    contact_df['ClickUp Company Association'] = ''
+    contact_df['HubSpot Company Association'] = ''  # HubSpot company ID from facility
+    contact_df['HubSpot Company Name'] = ''  # HubSpot company name from facility
+    contact_df['ClickUp Company Association'] = ''  # ClickUp task ID from facility
+    contact_df['ClickUp Task URL'] = ''  # Full ClickUp task URL from facility
     contact_df['First Name'] = ''
     contact_df['Last Name'] = ''
-    contact_df['HubSpot Contact Record ID'] = ''
+    contact_df['HubSpot Contact Record ID'] = ''  # HubSpot contact ID (if exists)
     contact_df['HS Contact First Name'] = ''
     contact_df['HS Contact Last Name'] = ''
     contact_df['HS Contact Company'] = ''
     contact_df['HS Contact Email'] = ''  # Email from matched HubSpot contact
-    contact_df['Company Mismatch'] = ''  # New column to flag mismatches
+    contact_df['Company Mismatch'] = ''  # Flag mismatches
+    # New: ClickUp contact fields
+    contact_df['ClickUp Contact Task ID'] = ''  # ClickUp task ID if contact exists in ClickUp
+    contact_df['ClickUp Contact Task URL'] = ''  # ClickUp task URL if contact exists in ClickUp
     
     matched_count = 0
     existing_contacts = 0
@@ -290,12 +405,14 @@ def main():
             matched_count += 1
             match_data = facility_lookup[facility_key]
             
-            # Set HubSpot Company Association
+            # Set HubSpot Company Association (from Matched Facilities Final Clean)
             contact_df.at[idx, 'HubSpot Company Association'] = match_data['hubspot_record_id']
+            contact_df.at[idx, 'HubSpot Company Name'] = match_data.get('hubspot_company_name', '')
             
-            # Extract and set ClickUp task ID
+            # Extract and set ClickUp task ID and URL
             task_id = extract_clickup_task_id(match_data['clickup_task_url'])
             contact_df.at[idx, 'ClickUp Company Association'] = task_id
+            contact_df.at[idx, 'ClickUp Task URL'] = match_data.get('clickup_task_url', '')
         
         # Split name into First Name and Last Name
         full_name = row.get('name', '')
@@ -324,6 +441,12 @@ def main():
                 if facility_val not in hs_company_val and hs_company_val not in facility_val:
                     contact_df.at[idx, 'Company Mismatch'] = f"FACILITY: {facility_val} | HS COMPANY: {hs_company_val}"
                     mismatch_count += 1
+        
+        # Check if contact exists in ClickUp using name lookup
+        clickup_contact = check_clickup_contact_exists(clickup_name_lookup, clickup_url_lookup, first_name, last_name, email)
+        if clickup_contact:
+            contact_df.at[idx, 'ClickUp Contact Task ID'] = clickup_contact.get('clickup_task_id', '')
+            contact_df.at[idx, 'ClickUp Contact Task URL'] = clickup_contact.get('clickup_task_url', '')
     
     print(f"  ✓ Matched {matched_count} contacts to facilities")
     print(f"  ✓ Found {existing_contacts} existing contacts in HubSpot")
